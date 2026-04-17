@@ -231,12 +231,27 @@ exit /b 0
     )
 
     :: Vencord via CLI Installer installieren
-    call :Output "[INFO] Starte Vencord Installation..."
-    call :Log "Starte Vencord CLI Installation"
-    "%INSTALLER_EXE%" install -branch stable >nul 2>&1
-    if errorlevel 1 (
-        :: Versuche ohne -branch Flag (Kompatibilitaet mit aelteren Versionen)
-        "%INSTALLER_EXE%" install >nul 2>&1
+    :: Versuche jede erkannte Discord-Installation einzeln mit explizitem Pfad
+    set "INSTALL_SUCCESS=0"
+
+    if exist "%DISCORD_LOCAL%" (
+        call :InstallForPath "%DISCORD_LOCAL%"
+    )
+    if exist "%DISCORD_PTB_LOCAL%" (
+        call :InstallForPath "%DISCORD_PTB_LOCAL%"
+    )
+    if exist "%DISCORD_CANARY_LOCAL%" (
+        call :InstallForPath "%DISCORD_CANARY_LOCAL%"
+    )
+
+    if "!INSTALL_SUCCESS!"=="0" (
+        call :Output "[INFO] Kein Discord-Pfad gefunden. Versuche mit --branch auto..."
+        call :Log "Kein Discord-Pfad, versuche Fallback mit --branch auto"
+        call :Output "[INFO] Starte Vencord Installation (Fallback)..."
+        "%INSTALLER_EXE%" --install --branch auto
+        if errorlevel 1 (
+            "%INSTALLER_EXE%" --install --branch stable
+        )
     )
 
     :: Ergebnis pruefen
@@ -248,4 +263,21 @@ exit /b 0
         call :Output "[FEHLER] Vencord Installation moeglicherweise fehlgeschlagen."
         call :Log "WARNUNG: Vencord Installation moeglicherweise fehlgeschlagen"
     )
+    goto :eof
+
+:: --- Vencord fuer einen bestimmten Discord-Pfad installieren ---
+:InstallForPath
+    set "TARGET_PATH=%~1"
+    call :Output "[INFO] Starte Vencord Installation fuer: %TARGET_PATH%"
+    call :Log "Starte Vencord CLI Installation fuer: %TARGET_PATH%"
+
+    :: --location und --branch sind gegenseitig ausschliessend, daher nur --location
+    "%INSTALLER_EXE%" --install --location "%TARGET_PATH%"
+    if not errorlevel 1 (
+        set "INSTALL_SUCCESS=1"
+        call :Log "Installation erfolgreich fuer: %TARGET_PATH%"
+        goto :eof
+    )
+
+    call :Log "Installation mit --location fehlgeschlagen fuer: %TARGET_PATH%"
     goto :eof
