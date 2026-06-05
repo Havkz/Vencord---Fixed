@@ -19,12 +19,14 @@ if /I "%~1"=="/silent" set "SILENT=1"
 :: --- Konfiguration ---
 :: Installationsverzeichnis (im lokalen AppData des Benutzers)
 set "INSTALL_DIR=%LOCALAPPDATA%\VencordAutoInstaller"
+set "INSTALL_SCRIPT=%INSTALL_DIR%\VencordAutoInstaller.bat"
 set "INSTALLER_EXE=%INSTALL_DIR%\VencordInstallerCli.exe"
 set "VBS_LAUNCHER=%INSTALL_DIR%\VencordSilentLauncher.vbs"
 set "DOWNLOAD_URL=https://github.com/Vencord/Installer/releases/latest/download/VencordInstallerCli.exe"
 set "AUTOSTART_NAME=VencordAutoInstaller"
 set "SCRIPT_PATH=%~f0"
 set "LOG_FILE=%INSTALL_DIR%\vencord_installer.log"
+set "AUTOSTART_CMD=PowerShell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command ""& '%INSTALL_SCRIPT%' /silent"""
 :: Discord-Installationsverzeichnisse (Standard-Pfade)
 set "DISCORD_LOCAL=%LOCALAPPDATA%\Discord"
 set "DISCORD_PTB_LOCAL=%LOCALAPPDATA%\DiscordPTB"
@@ -37,10 +39,19 @@ if not exist "%INSTALL_DIR%" (
     if errorlevel 1 exit /b 1
 )
 
-call :Log "VencordAutoInstaller gestartet"
+:: Script in stabiles Installationsverzeichnis kopieren (für zuverlässigen Autostart)
+if /I not "%SCRIPT_PATH%"=="%INSTALL_SCRIPT%" (
+    copy /Y "%SCRIPT_PATH%" "%INSTALL_SCRIPT%" >nul 2>&1
+    if errorlevel 1 (
+        call :Output "[FEHLER] Konnte Script nicht nach %INSTALL_SCRIPT% kopieren."
+        exit /b 1
+    )
+)
 
-:: --- VBS-Launcher für Hintergrund-Autostart erstellen ---
-call :CreateVBSLauncher
+:: Alte VBS-Datei aufräumen (VBS wird nicht mehr verwendet)
+if exist "%VBS_LAUNCHER%" del /f /q "%VBS_LAUNCHER%" >nul 2>&1
+
+call :Log "VencordAutoInstaller gestartet"
 
 :: --- Autostart-Eintrag prüfen und setzen ---
 call :SetupAutostart
@@ -82,19 +93,9 @@ exit /b 0
     if not defined SILENT echo %~1
     goto :eof
 
-:: --- VBS-Launcher erstellen (startet BAT unsichtbar im Hintergrund) ---
-:CreateVBSLauncher
-    :: Erstelle VBS-Datei immer neu, damit der Script-Pfad sicher aktuell ist
-    (
-        echo Set WshShell = CreateObject^("WScript.Shell"^)
-        echo WshShell.Run chr^(34^) ^& "%SCRIPT_PATH%" ^& chr^(34^) ^& " /silent", 0, False
-    ) > "%VBS_LAUNCHER%"
-    call :Log "VBS-Launcher aktualisiert: %VBS_LAUNCHER%"
-    goto :eof
-
-:: --- Autostart einrichten (via VBS für unsichtbaren Start) ---
+:: --- Autostart einrichten (ohne VBS, via verstecktem PowerShell-Start) ---
 :SetupAutostart
-    reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "%AUTOSTART_NAME%" /t REG_SZ /d "\"%VBS_LAUNCHER%\"" /f >nul 2>&1
+    reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "%AUTOSTART_NAME%" /t REG_SZ /d "%AUTOSTART_CMD%" /f >nul 2>&1
     if errorlevel 1 (
         call :Log "FEHLER: Autostart-Eintrag fehlgeschlagen"
         call :Output "[FEHLER] Konnte Autostart-Eintrag nicht setzen."
