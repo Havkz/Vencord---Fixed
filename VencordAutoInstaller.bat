@@ -84,28 +84,23 @@ exit /b 0
 
 :: --- VBS-Launcher erstellen (startet BAT unsichtbar im Hintergrund) ---
 :CreateVBSLauncher
-    :: Erstelle VBS-Datei die das BAT-Script unsichtbar startet
-    if not exist "%VBS_LAUNCHER%" (
-        (
-            echo Set WshShell = CreateObject^("WScript.Shell"^)
-            echo WshShell.Run chr^(34^) ^& "%SCRIPT_PATH%" ^& chr^(34^) ^& " /silent", 0, False
-        ) > "%VBS_LAUNCHER%"
-        call :Log "VBS-Launcher erstellt: %VBS_LAUNCHER%"
-    )
+    :: Erstelle VBS-Datei immer neu, damit der Script-Pfad sicher aktuell ist
+    (
+        echo Set WshShell = CreateObject^("WScript.Shell"^)
+        echo WshShell.Run chr^(34^) ^& "%SCRIPT_PATH%" ^& chr^(34^) ^& " /silent", 0, False
+    ) > "%VBS_LAUNCHER%"
+    call :Log "VBS-Launcher aktualisiert: %VBS_LAUNCHER%"
     goto :eof
 
 :: --- Autostart einrichten (via VBS für unsichtbaren Start) ---
 :SetupAutostart
-    reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "%AUTOSTART_NAME%" >nul 2>&1
+    reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "%AUTOSTART_NAME%" /t REG_SZ /d "\"%VBS_LAUNCHER%\"" /f >nul 2>&1
     if errorlevel 1 (
-        reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "%AUTOSTART_NAME%" /t REG_SZ /d "\"%VBS_LAUNCHER%\"" /f >nul 2>&1
-        if errorlevel 1 (
-            call :Log "FEHLER: Autostart-Eintrag fehlgeschlagen"
-            call :Output "[FEHLER] Konnte Autostart-Eintrag nicht setzen."
-        ) else (
-            call :Log "Autostart-Eintrag gesetzt"
-            call :Output "[OK] Autostart-Eintrag gesetzt."
-        )
+        call :Log "FEHLER: Autostart-Eintrag fehlgeschlagen"
+        call :Output "[FEHLER] Konnte Autostart-Eintrag nicht setzen."
+    ) else (
+        call :Log "Autostart-Eintrag gesetzt/aktualisiert"
+        call :Output "[OK] Autostart-Eintrag gesetzt/aktualisiert."
     )
     goto :eof
 
@@ -169,11 +164,9 @@ exit /b 0
     set "APP_DIR=%CHECK_DIR%\!LATEST_APP!"
 
     :: Methode 1: Prüfe ob _app.asar (Backup) existiert
-    :: Das ist der zuverlässigste Indikator dass Vencord injiziert ist
+    :: Hinweis: Backup allein ist KEIN sicherer Indikator (kann nach Deinstallation übrig bleiben)
     if exist "!APP_DIR!\resources\_app.asar" (
-        set "VENCORD_INSTALLED=1"
-        call :Log "Vencord gefunden in: !APP_DIR! (_app.asar Backup vorhanden)"
-        goto :eof
+        call :Log "Hinweis: _app.asar gefunden in !APP_DIR! (allein kein Installationsbeweis)"
     )
 
     :: Methode 2: Prüfe ob app.asar gepatchte Version ist (deutlich kleiner)
@@ -200,13 +193,23 @@ exit /b 0
         goto :eof
     )
 
-    :: Prüfe ob Discord läuft
+    :: Prüfe ob Discord (alle Varianten) läuft und schließe es vor der Installation
     tasklist /FI "IMAGENAME eq Discord.exe" 2>nul | find /I "Discord.exe" >nul
     if not errorlevel 1 (
         call :Log "Discord läuft, schließe es"
         taskkill /IM Discord.exe /F >nul 2>&1
-        timeout /t 3 /nobreak >nul
     )
+    tasklist /FI "IMAGENAME eq DiscordPTB.exe" 2>nul | find /I "DiscordPTB.exe" >nul
+    if not errorlevel 1 (
+        call :Log "DiscordPTB läuft, schließe es"
+        taskkill /IM DiscordPTB.exe /F >nul 2>&1
+    )
+    tasklist /FI "IMAGENAME eq DiscordCanary.exe" 2>nul | find /I "DiscordCanary.exe" >nul
+    if not errorlevel 1 (
+        call :Log "DiscordCanary läuft, schließe es"
+        taskkill /IM DiscordCanary.exe /F >nul 2>&1
+    )
+    timeout /t 3 /nobreak >nul
 
     :: Vencord via CLI Installer installieren
     :: Versuche jede erkannte Discord-Installation einzeln mit explizitem Pfad
