@@ -1,54 +1,99 @@
-# VencordAutoInstaller
+# VencordRepair
 
-Dieses Projekt enthält ein Windows-Batch-Script, das Vencord automatisch verwaltet.
+Repariert Vencord automatisch nach Discord-Updates.
 
-Datei: `VencordAutoInstaller.bat`
+## Technische Ursache: Warum verschwindet Vencord?
 
-## Funktionen
+Discord verwendet **Squirrel** (`Update.exe`) für automatische Updates. Der Update-Ablauf:
 
-- lädt den **offiziellen Vencord CLI Installer** von GitHub herunter
-- richtet einen **Autostart-Eintrag** ein
-- startet beim Windows-Start **unsichtbar im Hintergrund** (über VBS-Launcher)
-- prüft bei jedem Start, ob Vencord in Discord noch injiziert ist
-- installiert Vencord automatisch neu, falls es nicht mehr vorhanden ist
-- schreibt Logs nach:
-  - `%LOCALAPPDATA%\VencordAutoInstaller\vencord_installer.log`
+1. Discord lädt ein neues Update-Paket herunter (`.nupkg`)
+2. Squirrel erstellt ein **neues** `app-X.Y.Z` Verzeichnis unter `%LOCALAPPDATA%\Discord\`
+3. Das **alte** Verzeichnis (das den Vencord-Patch enthielt) wird **gelöscht**
+4. Die neue `app.asar` im neuen Ordner ist die **originale, ungepatchte** Discord-Datei
+5. → Vencord ist weg
 
-## Offizielle Download-Quelle
+**Was NICHT verloren geht:**
+- Vencord-Einstellungen (`%APPDATA%\Vencord\settings\settings.json`)
+- Vencord-Dist-Dateien (`%APPDATA%\Vencord\dist\`)
+- Nur der Patch in `resources\app.asar` wird ersetzt
 
-Das Script verwendet die offizielle Release-URL:
+**Windows Defender** ist **nicht** die Ursache — es wurden keine Vencord-bezogenen Threats gefunden.
 
-`https://github.com/Vencord/Installer/releases/latest/download/VencordInstallerCli.exe`
+## Dateien
 
-## Installation / Erststart
+| Datei | Beschreibung |
+|---|---|
+| `VencordRepair.ps1` | Haupt-Script (PowerShell) mit allen Funktionen |
+| `VencordRepair.bat` | Wrapper für Doppelklick-Start |
 
-1. `VencordAutoInstaller.bat` einmal manuell starten.
-2. Das Script erstellt:
-   - `%LOCALAPPDATA%\VencordAutoInstaller\VencordInstallerCli.exe`
-   - `%LOCALAPPDATA%\VencordAutoInstaller\VencordSilentLauncher.vbs`
-3. Das Script setzt den Autostart unter:
-   - `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-4. Beim nächsten Windows-Start läuft die Prüfung automatisch im Hintergrund.
+## Verwendung
 
-## Wie die Prüfung funktioniert
+### Reparatur (Standard)
+Doppelklick auf `VencordRepair.bat` oder:
+```powershell
+.\VencordRepair.ps1
+.\VencordRepair.ps1 -Action Repair
+```
 
-Das Script prüft Discord (Stable/PTB/Canary) im jeweiligen `app-*` Verzeichnis auf Vencord-Indikatoren:
+### Nur Status prüfen (keine Änderungen)
+```powershell
+.\VencordRepair.ps1 -Action Check
+```
 
-- `resources\_app.asar` (Backup der Originaldatei)
-- `resources\app\patcher.js`
-- optionaler Größenindikator bei `resources\app.asar`
+### Detaillierten Systemstatus anzeigen
+```powershell
+.\VencordRepair.ps1 -Action Status
+```
 
-Wenn kein Indikator gefunden wird, wird automatisch `install` über den Vencord CLI Installer ausgeführt.
+### Vencord deinstallieren
+```powershell
+.\VencordRepair.ps1 -Action Uninstall
+```
 
-## Sicherheit
+## Was das Script macht (Repair)
 
-- Es sind **keine sensiblen Daten** (Tokens, API-Keys, Passwörter) im Script hinterlegt.
-- Es werden nur Benutzerpfade (`%LOCALAPPDATA%`) und ein Benutzer-Registryzweig (`HKCU`) verwendet.
-- Es wird ausschließlich von der offiziellen Vencord-Quelle heruntergeladen.
+1. **Prüft** alle Discord-Varianten (Stable, PTB, Canary) auf Vencord-Patch
+2. **Sichert** vorhandene Vencord-Einstellungen (bis zu 10 Backups)
+3. **Lädt** den offiziellen VencordInstallerCli.exe herunter (von GitHub)
+4. **Schließt** Discord (alle Varianten) falls nötig
+5. **Installiert** Vencord via CLI Installer für jede betroffene Variante
+6. **Verifiziert** die Installation
+7. **Startet** Discord neu falls es vorher lief
 
-## Hinweise
+## Was das Script NICHT macht
 
-- Discord wird während einer Neuinstallation ggf. automatisch beendet.
-- Falls der Download fehlschlägt, Internetverbindung prüfen und Script erneut starten.
-- Für Diagnose die Logdatei prüfen:
-  - `%LOCALAPPDATA%\VencordAutoInstaller\vencord_installer.log`
+- Keine dauerhafte Deaktivierung von Windows Defender oder SmartScreen
+- Keine versteckten Hintergrundprozesse oder Autostart-Einträge
+- Keine Änderungen außerhalb der Discord/Vencord-Verzeichnisse
+- Keine unbekannten Binärdateien — nur der offizielle Vencord CLI Installer
+
+## Geänderte Dateien und Pfade
+
+### Durch Vencord (beim Patch)
+| Pfad | Änderung |
+|---|---|
+| `%LOCALAPPDATA%\Discord\app-X.Y.Z\resources\app.asar` | Ersetzt durch kleine Patcher-Datei (~218 Bytes) |
+| `%LOCALAPPDATA%\Discord\app-X.Y.Z\resources\_app.asar` | Original-Backup der app.asar (~3.6 MB) |
+
+### Durch VencordRepair
+| Pfad | Beschreibung |
+|---|---|
+| `%LOCALAPPDATA%\VencordRepair\repair.log` | Log-Datei |
+| `%LOCALAPPDATA%\VencordRepair\backups\` | Einstellungs-Backups (max. 10) |
+| `%TEMP%\VencordInstallerCli.exe` | Temporärer Installer (max. 7 Tage gecacht) |
+
+### Vencord-Einstellungen (bleiben bei Updates erhalten)
+| Pfad | Beschreibung |
+|---|---|
+| `%APPDATA%\Vencord\settings\settings.json` | Alle Plugin-Einstellungen |
+| `%APPDATA%\Vencord\settings\quickCss.css` | Benutzerdefiniertes CSS |
+| `%APPDATA%\Vencord\dist\` | Vencord-Dist-Dateien (patcher.js, renderer.js etc.) |
+
+## Rückgängig machen
+
+```powershell
+.\VencordRepair.ps1 -Action Uninstall
+```
+
+Stellt die originale `app.asar` aus dem Backup `_app.asar` wieder her.
+Einstellungen bleiben unter `%APPDATA%\Vencord\settings\` erhalten.
