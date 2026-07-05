@@ -1,4 +1,4 @@
-# VencordRepair v2.0
+die n# VencordRepair v2.0
 
 Überwacht und repariert Vencord automatisch nach Discord-Updates.
 
@@ -79,12 +79,16 @@ parallele Instanzen über einen globalen Mutex.
 
 ## Autostart-Details
 
-- **Registry-Pfad:** `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`
-- **Eintragsname:** `VencordRepair`
-- **Wert:** `PowerShell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "<Pfad>" -Action Watch`
+- **Methode:** Windows Aufgabenplanung (Scheduled Task)
+- **Taskname:** `VencordRepair Watch`
+- **Trigger:** Bei Benutzer-Login
+- **Aktion:** `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "<Pfad>" -Action Watch`
 - **Prüfintervall:** 15 Minuten
-- **Instanzschutz:** Globaler Mutex, verhindert doppelte Ausführung
+- **Instanzschutz:** `MultipleInstances = IgnoreNew` + globaler Mutex
+- **Fehlerverhalten:** `RestartCount = 0`, kein endloses Neustarten
+- **Fenster:** Vollständig unsichtbar, kein CMD/PowerShell-Fenster
 - **Update-Schutz:** Wartet, falls Discord `Update.exe` gerade läuft
+- **Alle Meldungen:** Nur in Logdatei, nicht in Konsole
 
 ## Was das Script macht (Repair)
 
@@ -124,12 +128,13 @@ parallele Instanzen über einen globalen Mutex.
 
 ## Deaktivierung und Entfernung
 
-Autostart entfernen:
+Überwachung entfernen:
 
 ```powershell
 .\VencordRepair.ps1 -Action Uninstall
 ```
 
-Oder manuell: Registry-Editor öffnen, unter
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` den Eintrag
-`VencordRepair` löschen.
+Entfernt den Scheduled Task `VencordRepair Watch` und eventuelle alte
+Registry-Autostart-Einträge. Vencord selbst bleibt installiert.
+
+Oder manuell: Aufgabenplanung öffnen, Task `VencordRepair Watch` löschen.

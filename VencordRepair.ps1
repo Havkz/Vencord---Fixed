@@ -11,10 +11,10 @@
 .PARAMETER Action
     Check     Einmal prüfen ob Vencord installiert ist
     Repair    Einmal reparieren falls nötig
-    Install   Autostart einrichten und Überwachung starten
-    Watch     Endlosschleife, prüft alle 15 Minuten
+    Install   Scheduled Task einrichten
+    Watch     Endlosschleife, prüft alle 15 Minuten (nur Log, keine Konsole)
     Status    Detaillierten Systemstatus anzeigen
-    Uninstall Autostart entfernen und Überwachung beenden
+    Uninstall Scheduled Task und alte Autostart-Einträge entfernen
     Restore   Letztes Einstellungs-Backup wiederherstellen
 #>
 
@@ -40,16 +40,20 @@ $PatchedAsarMaxSize  = 50000
 $DataDir             = Join-Path $env:LOCALAPPDATA 'VencordRepair'
 $BackupDir           = Join-Path $DataDir 'backups'
 $LogFile             = Join-Path $DataDir 'repair.log'
+$TaskName            = 'VencordRepair Watch'
 $AutostartName       = 'VencordRepair'
 $WatchIntervalSec    = 900
 $MutexName           = 'Global\VencordRepairMutex'
-$ScriptVersion       = '2.0'
+$ScriptVersion       = '2.1'
 
 $DiscordVariants = @(
     @{ Name = 'Discord';       LocalDir = Join-Path $env:LOCALAPPDATA 'Discord';       Process = 'Discord' }
     @{ Name = 'DiscordPTB';    LocalDir = Join-Path $env:LOCALAPPDATA 'DiscordPTB';    Process = 'DiscordPTB' }
     @{ Name = 'DiscordCanary'; LocalDir = Join-Path $env:LOCALAPPDATA 'DiscordCanary'; Process = 'DiscordCanary' }
 )
+
+# Im Watch-Modus nur in Logdatei schreiben, keine Konsole
+$Silent = ($Action -eq 'Watch')
 
 # ============================================================
 # Hilfsfunktionen
@@ -65,11 +69,13 @@ function Write-Log {
     }
     Add-Content -Path $LogFile -Value $line -Encoding UTF8
 
-    switch ($Level) {
-        'ERROR' { Write-Host ('  [FEHLER] {0}' -f $Message) -ForegroundColor Red }
-        'WARN'  { Write-Host ('  [WARNUNG] {0}' -f $Message) -ForegroundColor Yellow }
-        'OK'    { Write-Host ('  [OK] {0}' -f $Message) -ForegroundColor Green }
-        default { Write-Host ('  [INFO] {0}' -f $Message) -ForegroundColor Cyan }
+    if (-not $Silent) {
+        switch ($Level) {
+            'ERROR' { Write-Host ('  [FEHLER] {0}' -f $Message) -ForegroundColor Red }
+            'WARN'  { Write-Host ('  [WARNUNG] {0}' -f $Message) -ForegroundColor Yellow }
+            'OK'    { Write-Host ('  [OK] {0}' -f $Message) -ForegroundColor Green }
+            default { Write-Host ('  [INFO] {0}' -f $Message) -ForegroundColor Cyan }
+        }
     }
 }
 
@@ -139,7 +145,6 @@ function Backup-VencordSettings {
     Copy-Item -Path $VencordSettingsFile -Destination $dest -Force
     Write-Log ('Einstellungen gesichert: {0}' -f $dest) 'OK'
 
-    # Maximal 10 Backups behalten
     $old = @(Get-ChildItem -Path $BackupDir -Filter 'settings_backup_*.json' |
         Sort-Object LastWriteTime -Descending | Select-Object -Skip 10)
     foreach ($f in $old) {
@@ -166,7 +171,6 @@ function Stop-DiscordProcesses {
 }
 
 function Test-DiscordUpdating {
-    # Prüfe ob Update.exe gerade läuft
     $updating = Get-Process -Name 'Update' -ErrorAction SilentlyContinue |
         Where-Object { $_.Path -match 'Discord' }
     return ($null -ne $updating)
@@ -246,23 +250,77 @@ function Invoke-VencordInstallForDir {
     return $false
 }
 
-function Get-AutostartValue {
-    $scriptPath = $PSCommandPath
-    return 'PowerShell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Action Watch' -f $scriptPath
+# ============================================================
+# Scheduled Task Funktionen
+# ============================================================
+
+function Get-TaskScriptArguments {
+    return '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Action Watch' -f $PSCommandPath
 }
 
-function Get-AutostartRegistryPath {
-    return 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+function Test-ScheduledTaskExists {
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    return ($null -ne $task)
 }
 
-function Test-AutostartInstalled {
-    $regPath = Get-AutostartRegistryPath
-    try {
-        $val = Get-ItemProperty -Path $regPath -Name $AutostartName -ErrorAction SilentlyContinue
-        return ($null -ne $val)
-    } catch {
-        return $false
+function Remove-OldRegistryAutostart {
+    $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    # Entferne VencordRepair
+    $val = Get-ItemProperty -Path $regPath -Name $AutostartName -ErrorAction SilentlyContinue
+    if ($null -ne $val) {
+        Remove-ItemProperty -Path $regPath -Name $AutostartName -Force -ErrorAction SilentlyContinue
+        Write-Log ('Alter Registry-Autostart entfernt: {0}' -f $AutostartName) 'OK'
     }
+    # Entferne VencordAutoInstaller falls vorhanden
+    $val2 = Get-ItemProperty -Path $regPath -Name 'VencordAutoInstaller' -ErrorAction SilentlyContinue
+    if ($null -ne $val2) {
+        Remove-ItemProperty -Path $regPath -Name 'VencordAutoInstaller' -Force -ErrorAction SilentlyContinue
+        Write-Log 'Alter Registry-Autostart entfernt: VencordAutoInstaller' 'OK'
+    }
+}
+
+function Install-ScheduledTask {
+    $scriptPath = $PSCommandPath
+    $psExe = (Get-Process -Id $PID).Path
+
+    $taskAction = New-ScheduledTaskAction `
+        -Execute $psExe `
+        -Argument (Get-TaskScriptArguments)
+
+    $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+
+    $taskSettings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable `
+        -MultipleInstances IgnoreNew `
+        -RestartCount 0 `
+        -ExecutionTimeLimit ([TimeSpan]::Zero)
+
+    $taskPrincipal = New-ScheduledTaskPrincipal `
+        -UserId $env:USERNAME `
+        -LogonType Interactive `
+        -RunLevel Limited
+
+    # Task registrieren
+    Register-ScheduledTask `
+        -TaskName $TaskName `
+        -Action $taskAction `
+        -Trigger $taskTrigger `
+        -Settings $taskSettings `
+        -Principal $taskPrincipal `
+        -Force | Out-Null
+
+    return $true
+}
+
+function Remove-ScheduledTask-Safe {
+    if (Test-ScheduledTaskExists) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Log ('Scheduled Task entfernt: {0}' -f $TaskName) 'OK'
+        return $true
+    }
+    return $false
 }
 
 # ============================================================
@@ -316,9 +374,11 @@ function Invoke-Check {
 }
 
 function Invoke-Repair {
-    Write-Host ''
-    Write-Host '  Vencord-Reparatur...' -ForegroundColor White
-    Write-Host ('  {0}' -f ('=' * 50)) -ForegroundColor DarkGray
+    if (-not $Silent) {
+        Write-Host ''
+        Write-Host '  Vencord-Reparatur...' -ForegroundColor White
+        Write-Host ('  {0}' -f ('=' * 50)) -ForegroundColor DarkGray
+    }
 
     Wait-ForDiscordUpdate
 
@@ -360,8 +420,10 @@ function Invoke-Repair {
         if (-not $ok) { $allOk = $false }
     }
 
-    Write-Host ''
-    Write-Host '  Verifizierung...' -ForegroundColor White
+    if (-not $Silent) {
+        Write-Host ''
+        Write-Host '  Verifizierung...' -ForegroundColor White
+    }
     foreach ($item in $toRepair) {
         $appDir = Get-LatestAppDir -Dir $item.Variant.LocalDir
         if ($appDir) {
@@ -388,28 +450,32 @@ function Invoke-Repair {
 
 function Invoke-Install {
     Write-Host ''
-    Write-Host '  Autostart einrichten...' -ForegroundColor White
+    Write-Host '  Scheduled Task einrichten...' -ForegroundColor White
     Write-Host ('  {0}' -f ('=' * 50)) -ForegroundColor DarkGray
 
-    $regPath = Get-AutostartRegistryPath
-    $regValue = Get-AutostartValue
+    # Alte Autostart-Methoden entfernen
+    Remove-OldRegistryAutostart
+
+    if (Test-ScheduledTaskExists) {
+        Write-Log 'Vorhandener Task wird aktualisiert' 'INFO'
+    }
 
     try {
-        Set-ItemProperty -Path $regPath -Name $AutostartName -Value $regValue -Force
-        Write-Log ('Autostart-Eintrag erstellt: {0}' -f $AutostartName) 'OK'
-        Write-Log ('Registry: {0}\{1}' -f $regPath, $AutostartName) 'INFO'
-        Write-Log ('Wert: {0}' -f $regValue) 'INFO'
+        $null = Install-ScheduledTask
+        Write-Log ('Scheduled Task erstellt: {0}' -f $TaskName) 'OK'
+        Write-Log ('Trigger: Bei Login von {0}' -f $env:USERNAME) 'INFO'
+        Write-Log ('Aktion: PowerShell -WindowStyle Hidden ... -Action Watch' ) 'INFO'
+        Write-Log ('Instanzschutz: Nur eine Instanz erlaubt' ) 'INFO'
     } catch {
-        Write-Log ('Autostart-Eintrag fehlgeschlagen: {0}' -f $_.Exception.Message) 'ERROR'
+        Write-Log ('Task-Erstellung fehlgeschlagen: {0}' -f $_.Exception.Message) 'ERROR'
         return
     }
 
-    # Direkt eine Reparatur durchführen
+    # Direkt eine Prüfung durchführen
     $null = Invoke-Repair
 
-    # Dann in Watch-Modus wechseln
-    Write-Log 'Starte Überwachung...' 'OK'
-    Invoke-Watch
+    Write-Host ''
+    Write-Log 'Installation abgeschlossen. Überwachung startet beim nächsten Login.' 'OK'
 }
 
 function Invoke-Watch {
@@ -418,7 +484,7 @@ function Invoke-Watch {
     try {
         $mutex = New-Object System.Threading.Mutex($true, $MutexName, [ref]$mutexCreated)
     } catch {
-        Write-Log 'Konnte Mutex nicht erstellen, möglicherweise läuft bereits eine Instanz' 'ERROR'
+        Write-Log 'Mutex-Erstellung fehlgeschlagen' 'ERROR'
         return
     }
 
@@ -451,7 +517,6 @@ function Invoke-Watch {
                             $wasRunning = Stop-DiscordProcesses
                             $null = Invoke-VencordInstallForDir -InstallerPath $installer -DiscordDir $v.LocalDir
 
-                            # Verifizieren
                             $verify = Test-VencordPatched -AppDir (Get-LatestAppDir -Dir $v.LocalDir)
                             if ($verify.IsPatched) {
                                 Write-Log ('{0}: Automatische Reparatur erfolgreich' -f $v.Name) 'OK'
@@ -535,21 +600,62 @@ function Invoke-StatusAction {
         Write-Host '    settings.json: nicht vorhanden' -ForegroundColor Yellow
     }
 
-    # Autostart
+    # Scheduled Task
     Write-Host ''
-    Write-Host '  Autostart:' -ForegroundColor White
-    if (Test-AutostartInstalled) {
-        $regPath = Get-AutostartRegistryPath
-        $val = (Get-ItemProperty -Path $regPath -Name $AutostartName).$AutostartName
-        Write-Host ('    {0}: aktiv' -f $AutostartName) -ForegroundColor Green
-        Write-Host ('    Wert: {0}' -f $val) -ForegroundColor DarkGray
+    Write-Host '  Scheduled Task:' -ForegroundColor White
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($null -ne $task) {
+        $taskInfo = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+        $stateColor = if ($task.State -eq 'Ready' -or $task.State -eq 'Running') { 'Green' } else { 'Yellow' }
+        Write-Host ('    Name: {0}' -f $TaskName) -ForegroundColor $stateColor
+        Write-Host ('    Status: {0}' -f $task.State) -ForegroundColor $stateColor
+        if ($null -ne $taskInfo -and $null -ne $taskInfo.LastRunTime) {
+            $lastRun = $taskInfo.LastRunTime
+            if ($lastRun.Year -gt 2000) {
+                Write-Host ('    Letzter Lauf: {0}' -f $lastRun) -ForegroundColor DarkGray
+            } else {
+                Write-Host '    Letzter Lauf: noch nie' -ForegroundColor DarkGray
+            }
+            $lastResult = $taskInfo.LastTaskResult
+            $resultText = switch ($lastResult) {
+                0       { 'Erfolgreich' }
+                267009  { 'Läuft gerade' }
+                267014  { 'Wurde beendet' }
+                default { 'Code: {0}' -f $lastResult }
+            }
+            Write-Host ('    Letztes Ergebnis: {0}' -f $resultText) -ForegroundColor DarkGray
+        }
+        # Aktion anzeigen
+        $actions = $task.Actions
+        if ($actions.Count -gt 0) {
+            $act = $actions[0]
+            Write-Host ('    Programm: {0}' -f $act.Execute) -ForegroundColor DarkGray
+            Write-Host ('    Argumente: {0}' -f $act.Arguments) -ForegroundColor DarkGray
+        }
     } else {
-        Write-Host ('    {0}: nicht eingerichtet' -f $AutostartName) -ForegroundColor Yellow
+        Write-Host ('    {0}: nicht eingerichtet' -f $TaskName) -ForegroundColor Yellow
+        Write-Host '    Einrichten mit: .\VencordRepair.ps1 -Action Install' -ForegroundColor DarkGray
+    }
+
+    # Alte Registry-Einträge prüfen
+    $regPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $oldReg1 = Get-ItemProperty -Path $regPath -Name $AutostartName -ErrorAction SilentlyContinue
+    $oldReg2 = Get-ItemProperty -Path $regPath -Name 'VencordAutoInstaller' -ErrorAction SilentlyContinue
+    if ($null -ne $oldReg1 -or $null -ne $oldReg2) {
+        Write-Host ''
+        Write-Host '  Alte Autostart-Einträge:' -ForegroundColor Yellow
+        if ($null -ne $oldReg1) {
+            Write-Host ('    Registry: {0} (veraltet)' -f $AutostartName) -ForegroundColor Yellow
+        }
+        if ($null -ne $oldReg2) {
+            Write-Host '    Registry: VencordAutoInstaller (veraltet)' -ForegroundColor Yellow
+        }
+        Write-Host '    Entfernen mit: .\VencordRepair.ps1 -Action Install' -ForegroundColor DarkGray
     }
 
     # Laufende Instanz
     Write-Host ''
-    Write-Host '  Überwachung:' -ForegroundColor White
+    Write-Host '  Watch-Instanz:' -ForegroundColor White
     $mutexCheck = $false
     try {
         $m = New-Object System.Threading.Mutex($true, $MutexName, [ref]$mutexCheck)
@@ -557,11 +663,11 @@ function Invoke-StatusAction {
             Write-Host '    Keine laufende Instanz' -ForegroundColor DarkGray
             $m.ReleaseMutex()
         } else {
-            Write-Host '    Watch-Instanz läuft' -ForegroundColor Green
+            Write-Host '    Läuft im Hintergrund' -ForegroundColor Green
         }
         $m.Dispose()
     } catch {
-        Write-Host '    Watch-Instanz läuft' -ForegroundColor Green
+        Write-Host '    Läuft im Hintergrund' -ForegroundColor Green
     }
 
     # Backups
@@ -578,7 +684,7 @@ function Invoke-StatusAction {
         Write-Host '    Keine Backups vorhanden' -ForegroundColor DarkGray
     }
 
-    # Letzter Check aus Log
+    # Log
     Write-Host ''
     Write-Host '  Log:' -ForegroundColor White
     Write-Host ('    Pfad: {0}' -f $LogFile) -ForegroundColor DarkGray
@@ -593,7 +699,7 @@ function Invoke-StatusAction {
     }
 
     Write-Host ''
-    Write-Host ('  Prüfintervall: {0} Minuten' -f ($WatchIntervalSec / 60)) -ForegroundColor White
+    Write-Host ('  Prüfintervall: {0} Minuten' -f [int]($WatchIntervalSec / 60)) -ForegroundColor White
     Write-Host ('  Version: {0}' -f $ScriptVersion) -ForegroundColor White
 }
 
@@ -602,18 +708,19 @@ function Invoke-UninstallAction {
     Write-Host '  Autostart und Überwachung entfernen...' -ForegroundColor White
     Write-Host ('  {0}' -f ('=' * 50)) -ForegroundColor DarkGray
 
-    # Autostart entfernen
-    $regPath = Get-AutostartRegistryPath
-    if (Test-AutostartInstalled) {
-        Remove-ItemProperty -Path $regPath -Name $AutostartName -Force -ErrorAction SilentlyContinue
-        Write-Log ('Autostart-Eintrag entfernt: {0}' -f $AutostartName) 'OK'
+    # Scheduled Task entfernen
+    if (Remove-ScheduledTask-Safe) {
+        # Task wurde entfernt
     } else {
-        Write-Log 'Kein Autostart-Eintrag vorhanden' 'INFO'
+        Write-Log 'Kein Scheduled Task vorhanden' 'INFO'
     }
 
+    # Alte Registry-Einträge entfernen
+    Remove-OldRegistryAutostart
+
     Write-Host ''
-    Write-Log 'Vencord selbst bleibt installiert. Nur die Überwachung wurde entfernt.' 'OK'
-    Write-Log 'Zum Entfernen von Vencord: VencordRepair.ps1 -Action Repair mit manuellem Uninstall' 'INFO'
+    Write-Log 'Überwachung vollständig entfernt.' 'OK'
+    Write-Log 'Vencord selbst bleibt installiert.' 'INFO'
 }
 
 function Invoke-RestoreAction {
@@ -637,7 +744,6 @@ function Invoke-RestoreAction {
     Write-Log ('Stelle wieder her: {0}' -f $latest.FullName) 'INFO'
     Write-Log ('Backup vom: {0}' -f $latest.LastWriteTime) 'INFO'
 
-    # Aktuelles sichern bevor wir überschreiben
     if (Test-Path $VencordSettingsFile) {
         $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
         $preRestore = Join-Path $BackupDir ('settings_pre_restore_{0}.json' -f $ts)
@@ -645,7 +751,6 @@ function Invoke-RestoreAction {
         Write-Log ('Aktuelle Einstellungen gesichert: {0}' -f $preRestore) 'OK'
     }
 
-    # Zielverzeichnis sicherstellen
     $settingsDir = Split-Path $VencordSettingsFile -Parent
     if (-not (Test-Path $settingsDir)) {
         New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null
@@ -653,18 +758,17 @@ function Invoke-RestoreAction {
 
     Copy-Item -Path $latest.FullName -Destination $VencordSettingsFile -Force
     Write-Log 'Einstellungen wiederhergestellt' 'OK'
-    Write-Log 'Discord muss neu gestartet werden, damit die Änderungen wirksam werden' 'INFO'
+    Write-Log 'Discord neu starten, damit Änderungen wirksam werden' 'INFO'
 }
 
 # ============================================================
 # Hauptprogramm
 # ============================================================
 
-# Banner nur bei interaktiven Aktionen
-if ($Action -ne 'Watch') {
+if (-not $Silent) {
     Write-Host ''
     Write-Host '  +================================================+' -ForegroundColor Cyan
-    Write-Host ('  |  VencordRepair v{0}                             |' -f $ScriptVersion) -ForegroundColor Cyan
+    Write-Host ('  |  VencordRepair v{0}                            |' -f $ScriptVersion) -ForegroundColor Cyan
     Write-Host '  |  Repariert Vencord nach Discord-Updates         |' -ForegroundColor Cyan
     Write-Host '  +================================================+' -ForegroundColor Cyan
 }
@@ -684,12 +788,14 @@ switch ($Action) {
     }
     'Repair' {
         $result = Invoke-Repair
-        Write-Host ''
-        if ($result) {
-            Write-Host '  Reparatur abgeschlossen.' -ForegroundColor Green
-        } else {
-            Write-Host '  Reparatur mit Fehlern. Siehe Log:' -ForegroundColor Yellow
-            Write-Host ('    {0}' -f $LogFile) -ForegroundColor White
+        if (-not $Silent) {
+            Write-Host ''
+            if ($result) {
+                Write-Host '  Reparatur abgeschlossen.' -ForegroundColor Green
+            } else {
+                Write-Host '  Reparatur mit Fehlern. Siehe Log:' -ForegroundColor Yellow
+                Write-Host ('    {0}' -f $LogFile) -ForegroundColor White
+            }
         }
     }
     'Install' {
@@ -709,7 +815,7 @@ switch ($Action) {
     }
 }
 
-if ($Action -ne 'Watch') {
+if (-not $Silent) {
     Write-Host ''
     Write-Log ('VencordRepair beendet, Aktion: {0}' -f $Action)
 }
