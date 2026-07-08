@@ -280,37 +280,49 @@ function Remove-OldRegistryAutostart {
 }
 
 function Install-ScheduledTask {
-    $scriptPath = $PSCommandPath
     $psExe = (Get-Process -Id $PID).Path
+    $taskArgs = Get-TaskScriptArguments
 
-    $taskAction = New-ScheduledTaskAction `
-        -Execute $psExe `
-        -Argument (Get-TaskScriptArguments)
-
-    $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-
-    $taskSettings = New-ScheduledTaskSettingsSet `
-        -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries `
-        -StartWhenAvailable `
-        -MultipleInstances IgnoreNew `
-        -RestartCount 0 `
-        -ExecutionTimeLimit ([TimeSpan]::Zero)
-
-    $taskPrincipal = New-ScheduledTaskPrincipal `
-        -UserId $env:USERNAME `
-        -LogonType Interactive `
-        -RunLevel Limited
-
-    # Task registrieren
-    Register-ScheduledTask `
-        -TaskName $TaskName `
-        -Action $taskAction `
-        -Trigger $taskTrigger `
-        -Settings $taskSettings `
-        -Principal $taskPrincipal `
-        -Force | Out-Null
-
+    # Task-XML mit Hidden-Flag: verhindert jedes sichtbare Fenster,
+    # behält aber Interactive-Login für Desktop-Zugriff (Discord-Neustart)
+    $xml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>$($env:USERDOMAIN)\$($env:USERNAME)</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>$($env:USERDOMAIN)\$($env:USERNAME)</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>$psExe</Command>
+      <Arguments>$taskArgs</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"@
+    Register-ScheduledTask -TaskName $TaskName -Xml $xml -Force | Out-Null
     return $true
 }
 
