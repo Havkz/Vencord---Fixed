@@ -1,4 +1,4 @@
-die n# VencordRepair v2.0
+# VencordRepair v2.0
 
 Überwacht und repariert Vencord automatisch nach Discord-Updates.
 
